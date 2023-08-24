@@ -1,0 +1,101 @@
+---
+- name: Install Docker, Pi-hole, and Cloudflared
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install Docker dependencies
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg
+        - software-properties-common
+
+    - name: Detect Linux distribution
+      command: "cat /etc/os-release | grep '^ID=' | awk -F'=' '{print $2}'"
+      register: linux_distribution
+
+    - name: Detect Linux version
+      command: "cat /etc/os-release | grep '^VERSION_ID=' | awk -F'=' '{print $2}'"
+      register: linux_version
+
+    - name: Set Docker repository URL
+      set_fact:
+        docker_repo_url: "https://download.docker.com/linux/{{ linux_distribution.stdout }}/docker-{{ linux_version.stdout }}.list"
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/{{ linux_distribution.stdout }}/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "{{ docker_repo_url }}"
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+        state: present
+
+    - name: Add current user to the docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Download Pi-hole Docker container
+      docker_container:
+        name: pihole
+        image: pihole/pihole:latest
+        restart_policy: unless-stopped
+        env:
+          ServerIP: "{{ ansible_default_ipv4.address }}"
+          TZ: "Europe/Sofia"
+          DNS1: "127.0.0.1#5053"
+          DNS2: "127.0.0.1#5053"
+        ports:
+          - "53:53/tcp"
+          - "53:53/udp"
+          - "80:80/tcp"
+          - "443:443/tcp"
+        volumes:
+          - "{{ ansible_user_dir }}/pihole/etc-pihole/:/etc/pihole/"
+          - "{{ ansible_user_dir }}/pihole/etc-dnsmasq.d/:/etc/dnsmasq.d/"
+          - "{{ ansible_user_dir }}/pihole/custom-blocklists/:/etc/pihole/custom-blocklists/"
+        state: started
+
+    - name: Download blocklists
+      get_url:
+        url: "{{ item.url }}"
+        dest: "{{ ansible_user_dir }}/pihole/custom-blocklists/{{ item.filename }}"
+      loop:
+        - { url: "https://v.firebog.net/hosts/Easyprivacy.txt", filename: "Easyprivacy.txt" }
+        - { url: "https://adaway.org/hosts.txt", filename: "adaway_hosts.txt" }
+        # Add more blocklists as needed
+
+    - name: Restart Pi-hole container
+      docker_container:
+        name: pihole
+        state: restarted
+
+    - name: Download Cloudflared Docker container
+      docker_container:
+        name: cloudflared
+        image: crazymax/cloudflared:latest
+        restart_policy: unless-stopped
+        env:
+          TUNNEL_DNS_UPSTREAM: "https://adblock.dns.mullvad.net/dns-query"
+          TUNNEL_DNS_PORT: "5053"
+        ports:
+          - "5053:5053/tcp"
+          - "5053:5053/udp"
+        state: started
